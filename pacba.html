@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PCBA Component Inspector</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- OpenCV.js CDN -->
+    <script async src="https://docs.opencv.org/4.x/opencv.js" onload="onOpenCvReady()"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 flex items-center justify-center min-h-screen p-4">
+
+    <div class="bg-gray-800 p-8 rounded-xl shadow-2xl w-full max-w-6xl">
+        <h1 class="text-4xl font-bold text-center mb-6 text-gray-100">PCBA Component Inspector</h1>
+        <p class="text-center text-gray-400 mb-8">Upload a golden sample and a test sample to identify missing components.</p>
+
+        <!-- File Upload Section -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+            <div class="flex flex-col items-center">
+                <label for="goldenFile" class="block text-lg font-medium mb-2 text-gray-300">Golden Sample (Reference)</label>
+                <input type="file" id="goldenFile" class="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-violet-50 file:text-violet-700 hover:file:bg-violet-100 cursor-pointer rounded-full">
+            </div>
+            <div class="flex flex-col items-center">
+                <label for="testFile" class="block text-lg font-medium mb-2 text-gray-300">Test Sample</label>
+                <input type="file" id="testFile" class="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-violet-50 file:text-violet-700 hover:file:bg-violet-100 cursor-pointer rounded-full">
+            </div>
+        </div>
+
+        <!-- Action Button -->
+        <div class="text-center mb-8">
+            <button id="compareBtn" class="bg-purple-600 text-white font-bold py-3 px-8 rounded-full shadow-lg hover:bg-purple-700 transition duration-300 transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2 focus:ring-offset-gray-900" onclick="processImages()">
+                Compare PCBA
+            </button>
+        </div>
+
+        <!-- Status/Result Section -->
+        <div id="status" class="text-center text-lg font-semibold mb-6"></div>
+
+        <!-- Canvas for Images -->
+        <div id="image-canvases" class="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <div class="flex flex-col items-center">
+                <span class="text-gray-400 mb-2">Golden Sample</span>
+                <canvas id="goldenCanvas" class="w-full rounded-lg border-2 border-dashed border-gray-700"></canvas>
+            </div>
+            <div class="flex flex-col items-center">
+                <span class="text-gray-400 mb-2">Test Sample</span>
+                <canvas id="testCanvas" class="w-full rounded-lg border-2 border-dashed border-gray-700"></canvas>
+            </div>
+            <div class="flex flex-col items-center">
+                <span class="text-gray-400 mb-2">Result</span>
+                <canvas id="resultCanvas" class="w-full rounded-lg border-2 border-dashed border-gray-700"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let cv; // The OpenCV.js instance
+
+        // Wait for OpenCV.js to be ready
+        function onOpenCvReady() {
+            cv = window.cv;
+            if (cv) {
+                document.getElementById('status').innerText = 'OpenCV.js is ready.';
+            } else {
+                document.getElementById('status').innerText = 'OpenCV.js failed to load.';
+            }
+        }
+
+        async function processImages() {
+            const goldenFile = document.getElementById('goldenFile').files[0];
+            const testFile = document.getElementById('testFile').files[0];
+            const statusDiv = document.getElementById('status');
+
+            // Reset UI and check for files
+            statusDiv.className = "text-center text-lg font-semibold mb-6 text-gray-400";
+            statusDiv.innerText = "Processing...";
+            if (!goldenFile || !testFile) {
+                statusDiv.className = "text-center text-lg font-semibold mb-6 text-red-500";
+                statusDiv.innerText = "Please upload both golden and test images.";
+                return;
+            }
+            
+            // Create image elements from files
+            const goldenImg = await createImage(goldenFile);
+            const testImg = await createImage(testFile);
+
+            // Set up canvases
+            const goldenCanvas = document.getElementById('goldenCanvas');
+            const testCanvas = document.getElementById('testCanvas');
+            const resultCanvas = document.getElementById('resultCanvas');
+
+            goldenCanvas.width = goldenImg.width;
+            goldenCanvas.height = goldenImg.height;
+            testCanvas.width = testImg.width;
+            testCanvas.height = testImg.height;
+            resultCanvas.width = goldenImg.width;
+            resultCanvas.height = goldenImg.height;
+
+            const goldenContext = goldenCanvas.getContext('2d');
+            const testContext = testCanvas.getContext('2d');
+            
+            goldenContext.drawImage(goldenImg, 0, 0);
+            testContext.drawImage(testImg, 0, 0);
+
+            // Convert canvas to OpenCV Mat
+            let goldenMat = cv.imread(goldenCanvas);
+            let testMat = cv.imread(testCanvas);
+
+            // 1. Align the images
+            let alignedTestMat = new cv.Mat();
+            try {
+                alignedTestMat = alignImages(goldenMat, testMat);
+                // Draw the aligned test image
+                cv.imshow(testCanvas, alignedTestMat);
+            } catch (error) {
+                statusDiv.className = "text-center text-lg font-semibold mb-6 text-red-500";
+                statusDiv.innerText = "Error during image alignment. Make sure images have distinct features and are similar.";
+                goldenMat.delete(); testMat.delete(); alignedTestMat.delete();
+                return;
+            }
+
+            // 2. Find missing components and get pass/fail status
+            const { resultMat, pass } = findMissingComponents(goldenMat, alignedTestMat);
+
+            // 3. Display results
+            cv.imshow(resultCanvas, resultMat);
+
+            // Display final result message
+            if (pass) {
+                statusDiv.className = "text-center text-3xl font-bold mb-6 text-green-400";
+                statusDiv.innerText = "✅ Test Passed";
+            } else {
+                statusDiv.className = "text-center text-3xl font-bold mb-6 text-red-500";
+                statusDiv.innerText = "❌ Test Failed (Missing Components Found)";
+            }
+
+            // Cleanup Mats to free up memory
+            goldenMat.delete();
+            testMat.delete();
+            alignedTestMat.delete();
+            resultMat.delete();
+        }
+        
+        // Helper function to load image files
+        function createImage(file) {
+            return new Promise((resolve) => {
+                const img = new Image();
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    img.onload = () => resolve(img);
+                    img.src = e.target.result;
+                };
+                reader.readAsDataURL(file);
+            });
+        }
+
+        // --- Core OpenCV.js Logic (from original Python script) ---
+
+        function alignImages(image1, image2) {
+            let gray1 = new cv.Mat();
+            let gray2 = new cv.Mat();
+            cv.cvtColor(image1, gray1, cv.COLOR_RGBA2GRAY, 0);
+            cv.cvtColor(image2, gray2, cv.COLOR_RGBA2GRAY, 0);
+
+            let orb = new cv.ORB();
+            let kp1 = new cv.KeyPointVector();
+            let des1 = new cv.Mat();
+            let kp2 = new cv.KeyPointVector();
+            let des2 = new cv.Mat();
+            
+            orb.detectAndCompute(gray1, new cv.Mat(), kp1, des1);
+            orb.detectAndCompute(gray2, new cv.Mat(), kp2, des2);
+
+            let bf = new cv.BFMatcher(cv.NORM_HAMMING, true);
+            let matches = new cv.DMatchVector();
+            bf.match(des1, des2, matches);
+
+            let srcPts = [];
+            let dstPts = [];
+            for (let i = 0; i < matches.size(); ++i) {
+                let match = matches.get(i);
+                srcPts.push(kp1.get(match.queryIdx).pt);
+                dstPts.push(kp2.get(match.trainIdx).pt);
+            }
+
+            let M = new cv.Mat();
+            let mask = new cv.Mat();
+            M = cv.findHomography(
+                cv.matFromArray(dstPts.length, 1, cv.CV_32FC2, [].concat(...dstPts.map(p => [p.x, p.y]))),
+                cv.matFromArray(srcPts.length, 1, cv.CV_32FC2, [].concat(...srcPts.map(p => [p.x, p.y]))),
+                cv.RANSAC, 5.0, mask);
+            
+            let alignedImage = new cv.Mat();
+            cv.warpPerspective(image2, alignedImage, M, new cv.Size(image1.cols, image1.rows));
+
+            // Cleanup
+            gray1.delete(); gray2.delete(); orb.delete();
+            kp1.delete(); des1.delete(); kp2.delete(); des2.delete();
+            bf.delete(); matches.delete(); M.delete(); mask.delete();
+
+            return alignedImage;
+        }
+
+        function findMissingComponents(goldenMat, testMat) {
+            const FAIL_THRESHOLD = 500; // Adjust this value based on your needs
+
+            let grayGolden = new cv.Mat();
+            let grayTest = new cv.Mat();
+            cv.cvtColor(goldenMat, grayGolden, cv.COLOR_RGBA2GRAY, 0);
+            cv.cvtColor(testMat, grayTest, cv.COLOR_RGBA2GRAY, 0);
+
+            let diff = new cv.Mat();
+            cv.absdiff(grayGolden, grayTest, diff);
+
+            let thresh = new cv.Mat();
+            cv.threshold(diff, thresh, 30, 255, cv.THRESH_BINARY);
+
+            let kernel = cv.Mat.ones(5, 5, cv.CV_8U);
+            let dilated = new cv.Mat();
+            cv.dilate(thresh, dilated, kernel, new cv.Point(-1, -1), 2, cv.BORDER_CONSTANT, cv.morphologyDefaultBorderValue());
+
+            let contours = new cv.MatVector();
+            let hierarchy = new cv.Mat();
+            cv.findContours(dilated, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+            let outputMat = goldenMat.clone();
+            let totalArea = 0;
+
+            for (let i = 0; i < contours.size(); ++i) {
+                const contour = contours.get(i);
+                const area = cv.contourArea(contour);
+                if (area > 100) { // Filter out small noise
+                    const rect = cv.boundingRect(contour);
+                    const color = new cv.Scalar(0, 255, 0, 255); // Green color
+                    cv.rectangle(outputMat, new cv.Point(rect.x, rect.y), new cv.Point(rect.x + rect.width, rect.y + rect.height), color, 2);
+                    totalArea += area;
+                }
+            }
+            
+            const pass = totalArea < FAIL_THRESHOLD;
+
+            // Cleanup
+            grayGolden.delete(); grayTest.delete(); diff.delete();
+            thresh.delete(); kernel.delete(); dilated.delete();
+            contours.delete(); hierarchy.delete();
+
+            return { resultMat: outputMat, pass: pass };
+        }
+    </script>
+</body>
+</html>

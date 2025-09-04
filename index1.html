@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PCBA Component Inspector</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- OpenCV.js CDN -->
+    <script async src="https://docs.opencv.org/4.x/opencv.js" onload="onOpenCvReady()"></script>
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from 'https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js';
+
+        // Set log level for debugging
+        setLogLevel('debug');
+        
+        // Use global variables provided by the Canvas environment
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let app = null;
+        let auth = null;
+        let db = null;
+        let userId = null;
+        
+        if (firebaseConfig) {
+            app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
+            
+            // Wait for authentication state to be resolved
+            onAuthStateChanged(auth, async (user) => {
+                if (user) {
+                    userId = user.uid;
+                    document.getElementById('auth-status').innerText = `User ID: ${userId}`;
+                } else {
+                    try {
+                        if (initialAuthToken) {
+                            const userCredential = await signInWithCustomToken(auth, initialAuthToken);
+                            userId = userCredential.user.uid;
+                            document.getElementById('auth-status').innerText = `User ID: ${userId}`;
+                        } else {
+                            const userCredential = await signInAnonymously(auth);
+                            userId = userCredential.user.uid;
+                            document.getElementById('auth-status').innerText = `User ID: ${userId}`;
+                        }
+                    } catch (error) {
+                        console.error("Firebase Auth Error:", error);
+                        document.getElementById('auth-status').innerText = 'Authentication Failed';
+                    }
+                }
+            });
+            window.db = db;
+            window.userId = userId;
+        }
+        
+    </script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 flex items-center justify-center min-h-screen p-4">
+
+    <div class="bg-gray-800 p-8 rounded-xl shadow-2xl w-full max-w-6xl">
+        <div id="auth-status" class="text-xs text-right text-gray-500 mb-4">Authenticating...</div>
+        <h1 class="text-4xl font-bold text-center mb-6 text-gray-100">PCBA Component Inspector</h1>
+        <p class="text-center text-gray-400 mb-8">Scan a PCBA to check it against a saved golden sample.</p>
+
+        <!-- Serial Number Input -->
+        <div class="flex flex-col items-center mb-6">
+            <label for="serialNumberInput" class="block text-lg font-medium mb-2 text-gray-300">Enter PCBA Serial Number</label>
+            <input type="text" id="serialNumberInput" class="w-full md:w-1/2 p-3 text-center bg-gray-700 text-white rounded-lg border border-gray-600 focus:outline-none focus:border-purple-500 transition duration-200" placeholder="e.g., PCBA-12345">
+        </div>
+
+        <!-- Action Section -->
+        <div class="flex flex-col md:flex-row justify-center gap-4 mb-8">
+            <input type="file" id="goldenFile" accept="image/*" class="hidden">
+            <input type="file" id="testFile" accept="image/*" class="hidden">
+
+            <button id="saveBtn" class="bg-blue-600 text-white font-bold py-3 px-8 rounded-full shadow-lg hover:bg-blue-700 transition duration-300 transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-gray-900" onclick="saveGoldenSample()">
+                Save Golden Sample
+            </button>
+            <button id="compareBtn" class="bg-purple-600 text-white font-bold py-3 px-8 rounded-full shadow-lg hover:bg-purple-700 transition duration-300 transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2 focus:ring-offset-gray-900" onclick="processImages()">
+                Run Inspection
+            </button>
+        </div>
+
+        <!-- Status/Result Section -->
+        <div id="status" class="text-center text-lg font-semibold mb-6">OpenCV.js is loading...</div>
+
+        <!-- Canvas for Images -->
+        <div id="image-canvases" class="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <div class="flex flex-col items-center">
+                <span class="text-gray-400 mb-2">Golden Sample</span>
+                <canvas id="goldenCanvas" class="w-full rounded-lg border-2 border-dashed border-gray-700"></canvas>
+            </div>
+            <div class="flex flex-col items-center">
+                <span class="text-gray-400 mb-2">Test Sample</span>
+                <canvas id="testCanvas" class="w-full rounded-lg border-2 border-dashed border-gray-700"></canvas>
+            </div>
+            <div class="flex flex-col items-center">
+                <span class="text-gray-400 mb-2">Result</span>
+                <canvas id="resultCanvas" class="w-full rounded-lg border-2 border-dashed border-gray-700"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let cv; // The OpenCV.js instance
+
+        // Wait for OpenCV.js to be ready
+        function onOpenCvReady() {
+            cv = window.cv;
+            if (cv) {
+                document.getElementById('status').innerText = 'OpenCV.js is ready. Please enter a serial number.';
+            } else {
+                document.getElementById('status').innerText = 'OpenCV.js failed to load.';
+            }
+        }
+        
+        async function saveGoldenSample() {
+            const serialNumber = document.getElementById('serialNumberInput').value.trim();
+            const statusDiv = document.getElementById('status');
+            const goldenFileInput = document.getElementById('goldenFile');
+
+            if (!serialNumber) {
+                statusDiv.className = "text-center text-lg font-semibold mb-6 text-red-500";
+                statusDiv.innerText = "Please enter a serial number before saving.";
+                return;
+            }
+
+            goldenFileInput.click();
+            goldenFileInput.onchange = async (e) => {
+                const goldenFile = e.target.files[0];
+                if (!goldenFile) return;
+
+                statusDiv.className = "text-center text-lg font-semibold mb-6 text-yellow-400";
+                statusDiv.innerText = "Saving golden sample...";
+                
+                try {
+                    const reader = new FileReader();
+                    reader.onload = async (event) => {
+                        const base64Image = event.target.result;
+                        const docRef = doc(window.db, `artifacts/${__app_id}/public/data/pcba_templates`, serialNumber);
+                        await setDoc(docRef, { goldenImage: base64Image });
+                        statusDiv.className = "text-center text-lg font-semibold mb-6 text-green-400";
+                        statusDiv.innerText = `Golden sample for ${serialNumber} saved successfully!`;
+                    };
+                    reader.readAsDataURL(goldenFile);
+                } catch (error) {
+                    console.error("Error saving golden sample:", error);
+                    statusDiv.className = "text-center text-lg font-semibold mb-6 text-red-500";
+                    statusDiv.innerText = "Failed to save golden sample. See console for details.";
+                }
+                goldenFileInput.value = ''; // Reset file input
+            };
+        }
+
+        async function processImages() {
+            const serialNumber = document.getElementById('serialNumberInput').value.trim();
+            const testFileInput = document.getElementById('testFile');
+            const statusDiv = document.getElementById('status');
+
+            if (!serialNumber) {
+                statusDiv.className = "text-center text-lg font-semibold mb-6 text-red-500";
+                statusDiv.innerText = "Please enter a serial number before running inspection.";
+                return;
+            }
+
+            statusDiv.className = "text-center text-lg font-semibold mb-6 text-yellow-400";
+            statusDiv.innerText = "Checking for golden sample...";
+
+            const docRef = doc(window.db, `artifacts/${__app_id}/public/data/pcba_templates`, serialNumber);
+            const docSnap = await getDoc(docRef);
+
+            if (!docSnap.exists()) {
+                statusDiv.className = "text-center text-lg font-semibold mb-6 text-red-500";
+                statusDiv.innerText = `No golden sample found for ${serialNumber}. Please save one first.`;
+                return;
+            }
+
+            const goldenImgBase64 = docSnap.data().goldenImage;
+            const goldenImg = new Image();
+            await new Promise(resolve => {
+                goldenImg.onload = resolve;
+                goldenImg.src = goldenImgBase64;
+            });
+            
+            // Trigger test file upload
+            testFileInput.click();
+            testFileInput.onchange = async (e) => {
+                const testFile = e.target.files[0];
+                if (!testFile) return;
+
+                statusDiv.className = "text-center text-lg font-semibold mb-6 text-yellow-400";
+                statusDiv.innerText = "Running inspection...";
+
+                // Create image elements from files
+                const testImg = await createImage(testFile);
+
+                // Set up canvases
+                const goldenCanvas = document.getElementById('goldenCanvas');
+                const testCanvas = document.getElementById('testCanvas');
+                const resultCanvas = document.getElementById('resultCanvas');
+
+                goldenCanvas.width = goldenImg.width;
+                goldenCanvas.height = goldenImg.height;
+                testCanvas.width = testImg.width;
+                testCanvas.height = testImg.height;
+                resultCanvas.width = goldenImg.width;
+                resultCanvas.height = goldenImg.height;
+
+                const goldenContext = goldenCanvas.getContext('2d');
+                const testContext = testCanvas.getContext('2d');
+                
+                goldenContext.drawImage(goldenImg, 0, 0);
+                testContext.drawImage(testImg, 0, 0);
+
+                // Convert canvas to OpenCV Mat
+                let goldenMat = cv.imread(goldenCanvas);
+                let testMat = cv.imread(testCanvas);
+
+                // 1. Align the images
+                let alignedTestMat = new cv.Mat();
+                try {
+                    alignedTestMat = alignImages(goldenMat, testMat);
+                    // Draw the aligned test image
+                    cv.imshow(testCanvas, alignedTestMat);
+                } catch (error) {
+                    console.error("Alignment error:", error);
+                    statusDiv.className = "text-center text-lg font-semibold mb-6 text-red-500";
+                    statusDiv.innerText = "Error during image alignment. Make sure images have distinct features and are similar.";
+                    goldenMat.delete(); testMat.delete(); alignedTestMat.delete();
+                    return;
+                }
+
+                // 2. Find missing components and get pass/fail status
+                const { resultMat, pass } = findMissingComponents(goldenMat, alignedTestMat);
+
+                // 3. Display results
+                cv.imshow(resultCanvas, resultMat);
+
+                // Display final result message
+                if (pass) {
+                    statusDiv.className = "text-center text-3xl font-bold mb-6 text-green-400";
+                    statusDiv.innerText = `✅ Test Passed for ${serialNumber}`;
+                } else {
+                    statusDiv.className = "text-center text-3xl font-bold mb-6 text-red-500";
+                    statusDiv.innerText = `❌ Test Failed for ${serialNumber} (Missing Components Found)`;
+                }
+
+                // Cleanup Mats to free up memory
+                goldenMat.delete();
+                testMat.delete();
+                alignedTestMat.delete();
+                resultMat.delete();
+            };
+        }
+        
+        // Helper function to load image files
+        function createImage(file) {
+            return new Promise((resolve) => {
+                const img = new Image();
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    img.onload = () => resolve(img);
+                    img.src = e.target.result;
+                };
+                reader.readAsDataURL(file);
+            });
+        }
+
+        // --- Core OpenCV.js Logic (from original Python script) ---
+
+        function alignImages(image1, image2) {
+            let gray1 = new cv.Mat();
+            let gray2 = new cv.Mat();
+            cv.cvtColor(image1, gray1, cv.COLOR_RGBA2GRAY, 0);
+            cv.cvtColor(image2, gray2, cv.COLOR_RGBA2GRAY, 0);
+
+            let orb = new cv.ORB();
+            let kp1 = new cv.KeyPointVector();
+            let des1 = new cv.Mat();
+            let kp2 = new cv.KeyPointVector();
+            let des2 = new cv.Mat();
+            
+            orb.detectAndCompute(gray1, new cv.Mat(), kp1, des1);
+            orb.detectAndCompute(gray2, new cv.Mat(), kp2, des2);
+
+            let bf = new cv.BFMatcher(cv.NORM_HAMMING, true);
+            let matches = new cv.DMatchVector();
+            bf.match(des1, des2, matches);
+
+            let srcPts = [];
+            let dstPts = [];
+            for (let i = 0; i < matches.size(); ++i) {
+                let match = matches.get(i);
+                srcPts.push(kp1.get(match.queryIdx).pt);
+                dstPts.push(kp2.get(match.trainIdx).pt);
+            }
+
+            let M = new cv.Mat();
+            let mask = new cv.Mat();
+            M = cv.findHomography(
+                cv.matFromArray(dstPts.length, 1, cv.CV_32FC2, [].concat(...dstPts.map(p => [p.x, p.y]))),
+                cv.matFromArray(srcPts.length, 1, cv.CV_32FC2, [].concat(...srcPts.map(p => [p.x, p.y]))),
+                cv.RANSAC, 5.0, mask);
+            
+            let alignedImage = new cv.Mat();
+            cv.warpPerspective(image2, alignedImage, M, new cv.Size(image1.cols, image1.rows));
+
+            // Cleanup
+            gray1.delete(); gray2.delete(); orb.delete();
+            kp1.delete(); des1.delete(); kp2.delete(); des2.delete();
+            bf.delete(); matches.delete(); M.delete(); mask.delete();
+
+            return alignedImage;
+        }
+
+        function findMissingComponents(goldenMat, testMat) {
+            const FAIL_THRESHOLD = 500; // Adjust this value based on your needs
+
+            let grayGolden = new cv.Mat();
+            let grayTest = new cv.Mat();
+            cv.cvtColor(goldenMat, grayGolden, cv.COLOR_RGBA2GRAY, 0);
+            cv.cvtColor(testMat, grayTest, cv.COLOR_RGBA2GRAY, 0);
+
+            let diff = new cv.Mat();
+            cv.absdiff(grayGolden, grayTest, diff);
+
+            let thresh = new cv.Mat();
+            cv.threshold(diff, thresh, 30, 255, cv.THRESH_BINARY);
+
+            let kernel = cv.Mat.ones(5, 5, cv.CV_8U);
+            let dilated = new cv.Mat();
+            cv.dilate(thresh, dilated, kernel, new cv.Point(-1, -1), 2, cv.BORDER_CONSTANT, cv.morphologyDefaultBorderValue());
+
+            let contours = new cv.MatVector();
+            let hierarchy = new cv.Mat();
+            cv.findContours(dilated, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+            let outputMat = goldenMat.clone();
+            let totalArea = 0;
+
+            for (let i = 0; i < contours.size(); ++i) {
+                const contour = contours.get(i);
+                const area = cv.contourArea(contour);
+                if (area > 100) { // Filter out small noise
+                    const rect = cv.boundingRect(contour);
+                    const color = new cv.Scalar(0, 255, 0, 255); // Green color
+                    cv.rectangle(outputMat, new cv.Point(rect.x, rect.y), new cv.Point(rect.x + rect.width, rect.y + rect.height), color, 2);
+                    totalArea += area;
+                }
+            }
+            
+            const pass = totalArea < FAIL_THRESHOLD;
+
+            // Cleanup
+            grayGolden.delete(); grayTest.delete(); diff.delete();
+            thresh.delete(); kernel.delete(); dilated.delete();
+            contours.delete(); hierarchy.delete();
+
+            return { resultMat: outputMat, pass: pass };
+        }
+    </script>
+</body>
+</html>
